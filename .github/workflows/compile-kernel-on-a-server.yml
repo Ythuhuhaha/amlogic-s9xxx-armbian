@@ -82,10 +82,6 @@ on:
         description: "Set the kernel custom signature"
         required: false
         default: ""
-        type: choice
-        options:
-          - -ophub
-          - -chewy
 
 env:
   TZ: Asia/Jakarta

@@ -81,7 +81,11 @@ on:
       kernel_sign:
         description: "Set the kernel custom signature"
         required: false
-        default: ""
+        default: "-chewy"
+        type: choice
+        options:
+          - -ophub
+          - -chewy
 
 env:
   TZ: Asia/Jakarta
@@ -149,19 +153,92 @@ jobs:
           echo "status=success" >> ${GITHUB_OUTPUT}
 
       - name: Compile the kernel [ ${{ inputs.kernel_version }} ]
-        uses: ophub/amlogic-s9xxx-armbian@main
         if: ${{ steps.mapped.outputs.status }} == 'success' && !cancelled()
-        with:
-          build_target: kernel
-          kernel_source: ${{ inputs.kernel_source }}
-          kernel_version: ${{ inputs.kernel_version }}
-          kernel_auto: ${{ inputs.kernel_auto }}
-          delete_source: ${{ inputs.delete_source }}
-          kernel_package: ${{ inputs.kernel_package }}
-          kernel_sign: ${{ inputs.kernel_sign }}
-          kernel_toolchain: ${{ inputs.kernel_toolchain }}
-          compress_format: ${{ inputs.compress_format }}
-          silent_log: ${{ inputs.silent_log }}
+        run: |
+          cd ${{ github.action_path }}
+          echo -e "Start compile kernel..."
+
+          # Custom kernel config files
+          config_filepath="compile-kernel/tools/config"
+          kernel_outpath="compile-kernel/output"
+          [[ -d "${config_filepath}" ]] || mkdir -p ${config_filepath}
+          if [[ -n "${{ inputs.kernel_config }}" && "${{ inputs.kernel_config }}" != "false" ]]; then
+              if [[ "$(ls ${GITHUB_WORKSPACE}/${{ inputs.kernel_config }}/config-* -l 2>/dev/null | grep "^-" | wc -l)" -ne "0" ]]; then
+                  echo -e "Use a custom kernel compilation template..."
+                  rm -f ${config_filepath}/* 2>/dev/null && sync
+                  cp -vf ${GITHUB_WORKSPACE}/${{ inputs.kernel_config }}/config-* ${config_filepath}/ 2>/dev/null && sync
+                  echo -e "List of Kernel Custom Compilation Configuration Templates: \n$(ls -lh ${config_filepath} 2>/dev/null)"
+              else
+                  echo -e "The custom kernel compilation template path is invalid, continue to use the default template."
+              fi
+          else
+              echo -e "Use the default kernel compilation template."
+          fi
+
+          # Custom kernel patch files
+          custom_kernel_patch="compile-kernel/tools/patch"
+          [[ -d "${custom_kernel_patch}" ]] || mkdir -p ${custom_kernel_patch}
+          if [[ -n "${{ inputs.kernel_patch }}" && "${{ inputs.kernel_patch }}" != "false" ]]; then
+              if [[ -d "${GITHUB_WORKSPACE}/${{ inputs.kernel_patch }}" ]]; then
+                  echo -e "Use custom kernel patches..."
+                  rm -rf ${custom_kernel_patch}/* 2>/dev/null && sync
+                  cp -vrf ${GITHUB_WORKSPACE}/${{ inputs.kernel_patch }}/* -t ${custom_kernel_patch} && sync
+                  echo -e "Directory of custom kernel patches: \n$(ls -lh ${custom_kernel_patch} 2>/dev/null)"
+              else
+                  echo -e "Invalid custom kernel patch directory, skipping."
+              fi
+          else
+              echo -e "No custom kernel patches available."
+          fi
+
+          # You can use a Docker container on an arm64 server to compile the kernel natively with Armbian.
+          # Recommended Docker repository: https://hub.docker.com/u/ophub
+          # Set the Docker container name and script path
+          docker_container="armbian-ophub"
+          docker_script="/usr/sbin/armbian-kernel"
+          echo -e "Check the system runtime environment."
+          if command -v docker >/dev/null 2>&1; then
+              docker_compile="$(docker ps --format '{{.Names}}' 2>/dev/null | grep -x "${docker_container}" || true)"
+          else
+              docker_compile=""
+          fi
+          [[ -n "${docker_compile}" ]] && echo -e "The docker container [ ${docker_container} ] is running."
+
+          echo -e "Build kernel compilation command."
+          make_command=""
+          [[ -n "${{ inputs.kernel_source }}" ]] && make_command="${make_command} -r ${{ inputs.kernel_source }}"
+          [[ -n "${{ inputs.kernel_version }}" ]] && make_command="${make_command} -k ${{ inputs.kernel_version }}"
+          [[ -n "${{ inputs.kernel_auto }}" ]] && make_command="${make_command} -a ${{ inputs.kernel_auto }}"
+          [[ -n "${{ inputs.kernel_package }}" ]] && make_command="${make_command} -m ${{ inputs.kernel_package }}"
+          [[ -n "${{ inputs.auto_patch }}" ]] && make_command="${make_command} -p ${{ inputs.auto_patch }}"
+          # [[ -n "${{ inputs.kernel_sign }}" ]] && make_command="${make_command} -n ${{ inputs.kernel_sign }}"
+          [[ -n "${{ inputs.kernel_toolchain }}" ]] && make_command="${make_command} -t ${{ inputs.kernel_toolchain }}"
+          [[ -n "${{ inputs.compress_format }}" ]] && make_command="${make_command} -c ${{ inputs.compress_format }}"
+          [[ -n "${{ inputs.delete_source }}" ]] && make_command="${make_command} -d ${{ inputs.delete_source }}"
+          [[ -n "${{ inputs.silent_log }}" ]] && make_command="${make_command} -s ${{ inputs.silent_log }}"
+          read -r -a make_args <<< "${make_command}"
+
+          # Choose Ubuntu or a Docker container to compile the kernel.
+          if [[ "$(uname -m)" == "aarch64" && -n "${docker_compile}" ]]; then
+              echo -e "Using the Armbian Docker image to compile the kernel."
+              docker exec -i "${docker_container}" bash -c 'bash "$0" -u && bash "$0" "$@"' "${docker_script}" "${make_args[@]}"
+          else
+              echo -e "Using the original system to compile the kernel."
+              sudo ./recompile "${make_args[@]}"
+          fi
+
+          cd ${{ github.action_path }}
+          output_tags="$(ls -l ${PWD}/${kernel_outpath}/*.tar.gz 2>/dev/null | awk '{print $9}' | grep -oE '[1-9][0-9]{0,2}\.[0-9]{1,3}\.[0-9]+' | xargs | tr "[ ]" "_")"
+          echo -e "Output environment variables."
+          echo "PACKAGED_OUTPUTTAGS=${output_tags}" >> ${GITHUB_ENV}
+          echo "PACKAGED_OUTPUTPATH=${PWD}/${kernel_outpath}" >> ${GITHUB_ENV}
+          echo "PACKAGED_OUTPUTDATE=$(date +"%m.%d.%H%M")" >> ${GITHUB_ENV}
+          echo "PACKAGED_STATUS=success" >> ${GITHUB_ENV}
+          echo -e "PACKAGED_OUTPUTTAGS: ${output_tags}"
+          echo -e "PACKAGED_OUTPUTPATH: ${PWD}/${kernel_outpath}"
+          echo -e "PACKAGED_OUTPUTDATE: $(date +"%m.%d.%H%M")"
+          echo -e "PACKAGED_STATUS: success"
+          echo -e "PACKAGED_OUTPUTPATH files list: \n$(ls -lh ${PWD}/${kernel_outpath}/ 2>/dev/null)"
 
       - name: Upload Kernel to Release
         uses: ncipollo/release-action@main

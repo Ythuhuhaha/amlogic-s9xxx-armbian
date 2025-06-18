@@ -81,14 +81,15 @@ on:
       kernel_sign:
         description: "Set the kernel custom signature"
         required: false
-        default: "-ophub"
+        default: ""
         type: choice
         options:
           - -ophub
-          - -yourname
+          - -chewy
 
 env:
-  TZ: America/New_York
+  TZ: Asia/Jakarta
+  HN: chewy
 
 jobs:
   build:
@@ -119,6 +120,7 @@ jobs:
           sudo sed -i '/NVM_DIR/d;/skel/d' /root/{.bashrc,.profile}
           sudo rm -rf ~/{.cargo,.dotnet,.rustup}
           sudo timedatectl set-timezone "${TZ}"
+          sudo hostnamectl set-hostname "${HN}"
           echo "status=success" >> ${GITHUB_OUTPUT}
 
       - name: Create simulated physical disk
